@@ -114,28 +114,61 @@ object RegularExpressionVM {
     def execute(program: Program, s: String): Boolean = {
       def _execute(pc: ProgramCounter, i: StringIndex): Boolean = {
         program(pc) match {
-          case Character(c) => i < s.size && s(i) == c && _execute(pc+1, i+1)
-          case Jump(label) => _execute(label, i)
+          case Character(c)          => i < s.size && s(i) == c && _execute(pc+1, i+1)
+          case Jump(label)           => _execute(label, i)
           case Split(label1, label2) => _execute(label1, i) || _execute(label2, i)
-          case Match => i == s.size
+          case Match                 => i == s.size
         }
       }
-      _execute(0, 0)
+      _execute(0, 0)    // (ProgramCounter = 0: 命令列の最初の命令、i = 0: 文字列の最初の文字)
     }
   }
 
   object IterativeBacktrackingVM extends VM {
-    import scala.collection.immutable.Queue
+    import scala.collection.mutable.Queue
+
+    def execute(program: Program, s: String): Boolean = {
+      // threads は (PC, i) のキューで、今後実行すべき実行を蓄えている。
+      // IBVM では threads から、スレッドを取り出して実行することを繰り返す。
+      // Split するとキューにはふたつのスレッドが追加される。
+      // 命令の実行に失敗して死んだスレッドはキューから取り除かれる。
+      var threads = Queue[(ProgramCounter, StringIndex)]((0, 0))
+
+      object MatchFailure extends Exception
+      while (!threads.isEmpty) {
+        val (pc, i) = threads.dequeue()
+
+        try {
+          program(pc) match {
+            case Character(c) => {
+              if (i < s.size && s(i) == c) threads.enqueue((pc + 1, i + 1))
+              else throw MatchFailure
+            }
+            case Jump(label) => threads.enqueue((label, i))
+            case Split(label1, label2) => threads.enqueue((label1, i)).enqueue((label2, i))
+            case Match => {
+              if (i == s.size) return true
+              else throw MatchFailure
+            }
+          }
+        } catch { case MatchFailure => () }
+      }
+      false
+    }
+  }
+
+  // 上述のコードでスレッド生成を抑制するための最適化を施したもの。
+  object IterativeBacktrackingVM2 extends VM {
+    import scala.collection.mutable.Queue
 
     def execute(program: Program, s: String): Boolean = {
       var threads = Queue[(ProgramCounter, StringIndex)]((0, 0))
 
       object MatchFailure extends Exception
       while (!threads.isEmpty) {
-        val ((_pc, _i), rest) = threads.dequeue
+        val (_pc, _i) = threads.dequeue()
         var pc  = _pc
         var i   = _i
-        threads = rest
 
         try {
           while (true) {
@@ -146,10 +179,10 @@ object RegularExpressionVM {
                   i += 1
                 } else throw MatchFailure
               }
-              case Jump(label) => pc = label
+              case Jump(label) => pc = label    // スレッドを生成するかわりに現在のスレッドが実行を継続する
               case Split(label1, label2) => {
-                threads = threads.enqueue((label2, i))
-                pc = label1
+                threads.enqueue((label2, i))
+                pc = label1                     // label1 に該当するスレッドを生成するかわりに現在のスレッドが実行を継続する
               }
               case Match => {
                 if (i == s.size) return true
@@ -173,7 +206,9 @@ object RegularExpressionVM {
     def execute(program: Program, s: String): Boolean = {
       def endOfLine(i: Int): Boolean = i == s.length
 
-      var threads = Set[ProgramCounter](0)  // i文字目を処理したがっているスレッドたち
+      // threads は文字列の i 文字目を処理したがっているスレッドたちが実行しようとしている命令の PC の集合
+      // 最初は命令列の最初の命令に相当する 0 に初期化
+      var threads = Set[ProgramCounter](0)
 
       /*
        * 注意：以下のループは [0, s.length-1] でなく [0, s.length] の範囲を回る。
